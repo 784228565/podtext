@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "PodText",
+    "slug": "podtext",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "podtext",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#534AB7"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.podtext.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#534AB7"
+      },
+      "package": "com.podtext.app"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-av",
+      "expo-sqlite",
+      "expo-document-picker",
+      "expo-file-system",
+      "expo-status-bar"
+    ]
+  }
+}
