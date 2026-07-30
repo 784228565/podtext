@@ -1,3 +1,4 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import { getSettings } from '../store/settings';
 
 const FUNASR_BASE = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
@@ -14,6 +15,9 @@ interface FunASRWord {
   text: string;
   begin_time: number;
   end_time: number;
+  // Trailing punctuation attached to the word by Fun-ASR ("。"、"，"…).
+  // subtitle.tsx relies on it to rebuild sentence boundaries.
+  punctuation?: string;
 }
 
 interface FunASRSentence {
@@ -80,6 +84,7 @@ export async function transcribeAudio(
       text: w.text || '',
       begin_time: w.begin_time || 0,
       end_time: w.end_time || 0,
+      punctuation: w.punctuation || '',
     }));
     return {
       text: sentence.text,
@@ -210,6 +215,7 @@ function extractSentences(payload: any): FunASRSentence[] {
       text: w.text ?? '',
       begin_time: num(w.begin_time ?? w.start, 0),
       end_time: num(w.end_time ?? w.end, 0),
+      punctuation: w.punctuation ?? '',
     }));
     out.push({
       text,
@@ -307,13 +313,26 @@ export async function transcribe(
 ): Promise<FunASRResult> {
   const settings = getSettings();
   if (!settings.funasrApiKey) throw new Error('Fun-ASR API key not configured');
-  const sizeMB = (sizeBytes || 0) / (1024 * 1024);
+  let sizeMB = (sizeBytes || 0) / (1024 * 1024);
+
+  // The document picker often reports size=0 on Android. Blindly treating
+  // unknown size as "large" would route EVERY file to the async path, which
+  // only returns sentence-level timings (no word highlight). Probe the real
+  // size from disk first; only if the probe fails do we fall back to async.
+  if (sizeMB <= 0) {
+    try {
+      const info = await FileSystem.getInfoAsync(fileUri);
+      if (info.exists && typeof info.size === 'number' && info.size > 0) {
+        sizeMB = info.size / (1024 * 1024);
+      }
+    } catch {
+      // probe failed — sizeMB stays 0 → async path below
+    }
+  }
 
   // The synchronous flash model caps at ~20MB via base64 Data-URI.
-  // Route to the async (OSS upload) path when the file is clearly large OR when
-  // its size is unknown (the document picker often returns size=0 on Android),
-  // since naively trusting size=0 would push huge files through the sync path
-  // and hit the data-uri limit.
+  // Route to the async (OSS upload) path only when the file is clearly large
+  // or its size could not be determined at all.
   if (sizeMB > LARGE_FILE_MB || sizeMB <= 0) {
     onProgress?.(
       sizeMB > LARGE_FILE_MB
