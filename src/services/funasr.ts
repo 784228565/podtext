@@ -366,7 +366,7 @@ async function transcribeByChunks(
     const parts: FunASRResult[] = [];
     for (let i = 0; i < uris.length; i++) {
       onProgress?.(`转录片段 ${i + 1}/${uris.length}...`);
-      parts.push(await transcribeAudio(uris[i], language));
+      parts.push(await transcribeAudio(uris[i], language, onProgress));
     }
     return mergeChunkResults(parts);
   } finally {

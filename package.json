@@ -26,10 +26,6 @@
     "@types/react": "~19.2.0",
     "typescript": "~6.0.0"
   },
-  "devDependencies": {
-    "@types/react": "~19.2.0",
-    "typescript": "~6.0.0"
-  },
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
