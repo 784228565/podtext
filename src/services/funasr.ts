@@ -32,11 +32,13 @@ export interface FunASRResult {
 
 export async function transcribeAudio(
   audioFileUri: string,
-  language: string = 'ja'
+  language: string = 'ja',
+  onProgress?: (msg: string) => void
 ): Promise<FunASRResult> {
   const settings = getSettings();
   const apiKey = settings.funasrApiKey;
   if (!apiKey) throw new Error('Fun-ASR API key not configured');
+  onProgress?.('转录中...');
 
   const response = await fetch(audioFileUri);
   const buffer = await response.arrayBuffer();
@@ -196,10 +198,13 @@ async function transcribeLargeFile(
   fileUri: string,
   fileName: string,
   mimeType: string,
-  apiKey: string
+  apiKey: string,
+  onProgress?: (msg: string) => void
 ): Promise<FunASRResult> {
   // 1. Upload
+  onProgress?.('上传文件中...');
   const ossUrl = await uploadToTempOSS(fileUri, fileName, mimeType, apiKey);
+  onProgress?.('文件已上传，等待转录...');
 
   // 2. Submit async task
   const subRes = await fetch(FUNASR_ASYNC_SUBMIT, {
@@ -225,8 +230,11 @@ async function transcribeLargeFile(
   // 3. Poll
   let last: any = null;
   const deadline = Date.now() + 10 * 60 * 1000; // 10 min
+  const startedAt = Date.now();
   while (Date.now() < deadline) {
     await sleep(3000);
+    const waited = Math.round((Date.now() - startedAt) / 1000);
+    onProgress?.(`转录中（已等待 ${waited}s）...`);
     const qRes = await fetch(`${FUNASR_TASK_BASE}/${taskId}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -267,13 +275,14 @@ export async function transcribe(
   fileName: string,
   mimeType: string,
   sizeBytes: number,
-  language: string = 'ja'
+  language: string = 'ja',
+  onProgress?: (msg: string) => void
 ): Promise<FunASRResult> {
   const settings = getSettings();
   if (!settings.funasrApiKey) throw new Error('Fun-ASR API key not configured');
   const sizeMB = sizeBytes / (1024 * 1024);
   if (sizeMB > LARGE_FILE_MB) {
-    return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey);
+    return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey, onProgress);
   }
-  return transcribeAudio(fileUri, language);
+  return transcribeAudio(fileUri, language, onProgress);
 }
