@@ -102,6 +102,23 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Expo SDK >=54 replaces the global fetch with expo/fetch (winter runtime),
+// whose convertFormDataAsync only accepts string / Blob / { bytes() } parts
+// and throws "Unsupported FormDataPart implementation" for React Native's
+// classic { uri, name, type } file parts. XMLHttpRequest is NOT replaced and
+// streams { uri } parts through the native networking stack (no JS memory
+// buffering — important for large videos), so the OSS upload must go via XHR.
+function postMultipartXHR(url: string, form: FormData): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText || '' });
+    xhr.onerror = () => reject(new Error('OSS upload network error'));
+    xhr.ontimeout = () => reject(new Error('OSS upload timed out'));
+    xhr.send(form);
+  });
+}
+
 async function uploadToTempOSS(
   fileUri: string,
   fileName: string,
@@ -139,23 +156,17 @@ async function uploadToTempOSS(
   form.append('x-oss-forbid-overwrite', String(forbidOverwrite));
   form.append('key', `${uploadDir}/${fileName}`);
   form.append('success_action_status', '200');
-  // RN/Expo native upload only accepts a { uri, name, type } object for file
-  // parts (never the raw asset). Do NOT set Content-Type manually — fetch must
-  // add `multipart/form-data; boundary=...` itself, or the native layer throws
-  // "unsupported formdatapart implementation".
+  // Native XHR upload accepts a { uri, name, type } object for file parts
+  // (never the raw asset) and sets the multipart boundary itself.
   form.append('file', {
     uri: fileUri,
     name: fileName || `upload-${Date.now()}.bin`,
     type: mimeType || 'application/octet-stream',
   } as any);
 
-  const ossRes = await fetch(uploadHost, {
-    method: 'POST',
-    body: form,
-  });
-  if (!ossRes.ok) {
-    const body = await ossRes.text().catch(() => '');
-    throw new Error(`Fun-ASR OSS upload failed (${ossRes.status}): ${body}`);
+  const ossRes = await postMultipartXHR(uploadHost, form);
+  if (ossRes.status < 200 || ossRes.status >= 300) {
+    throw new Error(`Fun-ASR OSS upload failed (${ossRes.status}): ${ossRes.body}`);
   }
   // The oss:// URL is deterministic from upload_dir + fileName.
   return `oss://${uploadDir}/${fileName}`;

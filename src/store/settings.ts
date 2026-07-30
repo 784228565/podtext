@@ -1,5 +1,14 @@
 let memoryStore: Record<string, string> = {};
-let historyStore: Array<{ id: string; type: string; title: string; data: string; createdAt: number }> = [];
+
+export interface HistoryItem {
+  id: string;
+  type: 'video' | 'podcast';
+  title: string;
+  data: string;
+  createdAt: number;
+}
+
+let historyStore: HistoryItem[] = [];
 
 export function getSettings(): Record<string, string> {
   return { ...memoryStore };
@@ -13,14 +22,6 @@ export async function saveApiKeys(mimoApiKey: string, funasrApiKey: string, funa
 
 export async function loadAllSettings(): Promise<void> {
   // in-memory store, always loaded
-}
-
-export interface HistoryItem {
-  id: string;
-  type: 'video' | 'podcast';
-  title: string;
-  data: string;
-  createdAt: number;
 }
 
 export async function addHistory(item: Omit<HistoryItem, 'createdAt'>): Promise<void> {
