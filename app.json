@@ -22,7 +22,14 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundColor": "#534AB7"
       },
-      "package": "com.podtext.app"
+      "package": "com.podtext.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -30,7 +37,14 @@
       "expo-sqlite",
       "expo-document-picker",
       "expo-file-system",
-      "expo-status-bar"
-    ]
+      "expo-status-bar",
+      "expo-dev-client"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d11d9c3b-d1fa-42b4-8e0c-8c6e8d0b71da"
+      }
+    }
   }
 }

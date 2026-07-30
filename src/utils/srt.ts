@@ -1,9 +1,16 @@
+export interface SubtitleWord {
+  text: string;
+  begin_time: number;
+  end_time: number;
+}
+
 export interface SubtitleEntry {
   index: number;
   startMs: number;
   endMs: number;
   original: string;
   translation: string;
+  words?: SubtitleWord[];
 }
 
 export function parseSRT(srtContent: string): SubtitleEntry[] {
@@ -64,7 +71,7 @@ export function generateSRT(entries: SubtitleEntry[]): string {
 }
 
 export function generateBilingualSubtitles(
-  originalSentences: Array<{ text: string; begin_time: number; end_time: number }>,
+  originalSentences: Array<{ text: string; begin_time: number; end_time: number; words?: SubtitleWord[] }>,
   translations: string[]
 ): SubtitleEntry[] {
   return originalSentences.map((s, i) => ({
@@ -73,5 +80,6 @@ export function generateBilingualSubtitles(
     endMs: s.end_time,
     original: s.text,
     translation: translations[i] || '',
+    words: s.words || undefined,
   }));
 }

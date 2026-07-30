@@ -8,6 +8,7 @@ interface FunASRResult {
     text: string;
     begin_time: number;
     end_time: number;
+    words?: Array<{ text: string; begin_time: number; end_time: number }>;
   }>;
 }
 
@@ -57,16 +58,17 @@ export async function transcribeAudio(
   if (!res.ok) throw new Error(`Fun-ASR (${res.status}): ${text}`);
 
   const data = JSON.parse(text);
-  const content = data.output?.choices?.[0]?.message?.content?.[0];
+  const sentence = data.output?.output?.sentence;
 
-  if (content?.transcription) {
+  if (sentence?.text) {
+    const words = (sentence.words || []).map((w: any) => ({
+      text: w.text || '',
+      begin_time: w.begin_time || 0,
+      end_time: w.end_time || 0,
+    }));
     return {
-      text: content.transcription.text || '',
-      sentences: (content.transcription.sentences || []).map((s: any) => ({
-        text: s.text || '',
-        begin_time: s.begin_time || 0,
-        end_time: s.end_time || 0,
-      })),
+      text: sentence.text,
+      sentences: [{ text: sentence.text, begin_time: sentence.begin_time || 0, end_time: sentence.end_time || 0, words }],
     };
   }
 

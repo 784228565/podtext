@@ -10,7 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { v4 as uuidv4 } from 'uuid';
+import { uuidv4 } from '../../src/utils/uuid';
 import { generatePodcastScript } from '../../src/services/mimo';
 import { synthesizePodcastAudio } from '../../src/services/edge-tts';
 import { addHistory, getSettings, loadAllSettings } from '../../src/store/settings';
