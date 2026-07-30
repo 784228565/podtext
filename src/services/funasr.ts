@@ -139,12 +139,19 @@ async function uploadToTempOSS(
   form.append('x-oss-forbid-overwrite', String(forbidOverwrite));
   form.append('key', `${uploadDir}/${fileName}`);
   form.append('success_action_status', '200');
-  form.append('file', { uri: fileUri, name: fileName, type: mimeType } as any);
+  // RN/Expo native upload only accepts a { uri, name, type } object for file
+  // parts (never the raw asset). Do NOT set Content-Type manually — fetch must
+  // add `multipart/form-data; boundary=...` itself, or the native layer throws
+  // "unsupported formdatapart implementation".
+  form.append('file', {
+    uri: fileUri,
+    name: fileName || `upload-${Date.now()}.bin`,
+    type: mimeType || 'application/octet-stream',
+  } as any);
 
   const ossRes = await fetch(uploadHost, {
     method: 'POST',
     body: form,
-    headers: { 'Content-Type': 'multipart/form-data' },
   });
   if (!ossRes.ok) {
     const body = await ossRes.text().catch(() => '');
