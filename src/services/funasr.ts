@@ -1,5 +1,11 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getSettings } from '../store/settings';
+import {
+  isFFmpegAvailable,
+  mediaToWavChunks,
+  cleanupChunks,
+  CHUNK_SECONDS,
+} from './audio-chunker';
 
 const FUNASR_BASE = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 const FUNASR_ASYNC_SUBMIT = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription';
@@ -301,6 +307,94 @@ async function transcribeLargeFile(
   return { text: fullText, sentences, preSegmented: true };
 }
 
+// ---------------------------------------------------------------------------
+// Chunked path (dev build only): extract audio via ffmpeg, split into WAV
+// chunks, transcribe each chunk with the SYNC flash model, then merge with
+// time offsets. Restores word-level timings for large files.
+// ---------------------------------------------------------------------------
+
+// Merge per-chunk sync results into one blob. Word timestamps are absolute
+// per chunk, so shift each chunk by its offset. The merged result is shaped
+// exactly like transcribeAudio's (preSegmented=false): subtitle.tsx then does
+// sentence splitting by "。" over the full text, so chunk boundaries get
+// re-segmented consistently — words and punctuation flow through unchanged.
+export function mergeChunkResults(parts: FunASRResult[]): FunASRResult {
+  const allWords: FunASRWord[] = [];
+  let fullText = '';
+  // Track the end of the last chunk's sentence (with offset) — this preserves
+  // trailing silence that comes after the last word, so the player's total
+  // duration matches the real audio length.
+  let lastSentenceEnd = 0;
+  parts.forEach((part, i) => {
+    const offsetMs = i * CHUNK_SECONDS * 1000;
+    fullText += part.text || '';
+    const words = part.sentences[0]?.words || [];
+    for (const w of words) {
+      allWords.push({
+        text: w.text,
+        begin_time: w.begin_time + offsetMs,
+        end_time: w.end_time + offsetMs,
+        punctuation: w.punctuation || '',
+      });
+    }
+    const sentEnd = (part.sentences[0]?.end_time ?? 0) + offsetMs;
+    if (sentEnd > lastSentenceEnd) lastSentenceEnd = sentEnd;
+  });
+  const lastWordEnd = allWords.length > 0 ? allWords[allWords.length - 1].end_time : 0;
+  const lastEnd = Math.max(lastSentenceEnd, lastWordEnd);
+  return {
+    text: fullText,
+    sentences: [{ text: fullText, begin_time: 0, end_time: lastEnd, words: allWords }],
+    preSegmented: false,
+  };
+}
+
+async function transcribeByChunks(
+  fileUri: string,
+  language: string,
+  onProgress?: (msg: string) => void
+): Promise<FunASRResult> {
+  onProgress?.('提取音轨中...');
+  const maxSingle = (LARGE_FILE_MB - 1) * 1024 * 1024; // keep base64 well under 20MB
+  const { uris, chunked } = await mediaToWavChunks(fileUri, maxSingle);
+  try {
+    if (!chunked) {
+      // Audio track alone is small enough — single sync call, best continuity.
+      onProgress?.('音轨较小，整段同步转录...');
+      return await transcribeAudio(uris[0], language, onProgress);
+    }
+    const parts: FunASRResult[] = [];
+    for (let i = 0; i < uris.length; i++) {
+      onProgress?.(`转录片段 ${i + 1}/${uris.length}...`);
+      parts.push(await transcribeAudio(uris[i], language));
+    }
+    return mergeChunkResults(parts);
+  } finally {
+    cleanupChunks();
+  }
+}
+
+// Large/unknown-size entry: prefer chunked sync (word-level) when ffmpeg is
+// available; otherwise (Expo Go, or any ffmpeg failure) fall back to the
+// async OSS path (sentence-level).
+async function transcribeViaChunksOrAsync(
+  fileUri: string,
+  fileName: string,
+  mimeType: string,
+  apiKey: string,
+  language: string,
+  onProgress?: (msg: string) => void
+): Promise<FunASRResult> {
+  if (isFFmpegAvailable()) {
+    try {
+      return await transcribeByChunks(fileUri, language, onProgress);
+    } catch (err: any) {
+      onProgress?.(`切片转录失败（${err?.message || '未知错误'}），改用异步转录...`);
+    }
+  }
+  return transcribeLargeFile(fileUri, fileName, mimeType, apiKey, onProgress);
+}
+
 // Dispatch: small files use the synchronous flash model (word-level timings);
 // large files use async file transcription (sentence-level timings).
 export async function transcribe(
@@ -331,15 +425,17 @@ export async function transcribe(
   }
 
   // The synchronous flash model caps at ~20MB via base64 Data-URI.
-  // Route to the async (OSS upload) path only when the file is clearly large
-  // or its size could not be determined at all.
+  // Large/unknown-size files: dev builds chunk the audio and stay on the
+  // sync model (word-level); Expo Go falls back to async (sentence-level).
   if (sizeMB > LARGE_FILE_MB || sizeMB <= 0) {
     onProgress?.(
       sizeMB > LARGE_FILE_MB
-        ? `文件较大（${sizeMB.toFixed(1)}MB），使用大文件异步转录...`
+        ? `文件较大（${sizeMB.toFixed(1)}MB），${isFFmpegAvailable() ? '切片转录' : '使用大文件异步转录'}...`
         : '文件大小未知，使用大文件异步转录...'
     );
-    return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey, onProgress);
+    return transcribeViaChunksOrAsync(
+      fileUri, fileName, mimeType, settings.funasrApiKey, language, onProgress
+    );
   }
 
   // Known small file → synchronous path (preserves word-level timings).
@@ -347,11 +443,13 @@ export async function transcribe(
     return await transcribeAudio(fileUri, language, onProgress);
   } catch (err: any) {
     const msg = err?.message || '';
-    // The sync path caps at 20MB data-uri. If it failed because of size, retry
-    // via the async path instead of surfacing a hard error.
+    // The sync path caps at 20MB data-uri. If it failed because of size,
+    // retry via chunked/async instead of surfacing a hard error.
     if (/TooLarge|20971520|data-uri|max bytes/i.test(msg)) {
-      onProgress?.('文件超过同步接口限制，自动切换到大文件异步转录...');
-      return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey, onProgress);
+      onProgress?.('文件超过同步接口限制，自动切换...');
+      return transcribeViaChunksOrAsync(
+        fileUri, fileName, mimeType, settings.funasrApiKey, language, onProgress
+      );
     }
     throw err;
   }

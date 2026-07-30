@@ -38,7 +38,8 @@
       "expo-document-picker",
       "expo-file-system",
       "expo-status-bar",
-      "expo-dev-client"
+      "expo-dev-client",
+      ["@config-plugins/ffmpeg-kit-react-native", { "package": "min" }]
     ],
     "extra": {
       "router": {},
