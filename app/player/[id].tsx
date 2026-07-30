@@ -9,6 +9,21 @@ import {
 import { useLocalSearchParams, Stack } from 'expo-router';
 import { getHistory } from '../../src/store/settings';
 
+// Detect whether the native audio module (ExponentAV) is present in this binary.
+// On the GitHub-built Expo Go 57 it is NOT, so we silently fall back to a timer.
+// After installing an EAS dev build (which bundles expo-av), this becomes available
+// and the player produces real sound.
+let AVVideo: any = null;
+try {
+  const av = require('expo-av');
+  const RN = require('react-native');
+  if (av && av.Video && RN && RN.NativeModules && RN.NativeModules.ExponentAV) {
+    AVVideo = av.Video;
+  }
+} catch (e) {
+  AVVideo = null;
+}
+
 interface SubtitleWord {
   text: string;
   begin_time: number;
@@ -37,10 +52,15 @@ export default function VideoPlayerScreen() {
   const [durationMs, setDurationMs] = useState(0);
   const [activeIdx, setActiveIdx] = useState(-1);
   const [activeWordIdx, setActiveWordIdx] = useState(-1);
+  const [videoUri, setVideoUri] = useState<string | null>(null);
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startRef = useRef(0);
   const pausedRef = useRef(0);
   const scrollRef = useRef<ScrollView>(null);
+  const videoRef = useRef<any>(null);
+
+  const useNative = !!AVVideo && !!videoUri;
 
   useEffect(() => {
     (async () => {
@@ -50,6 +70,7 @@ export default function VideoPlayerScreen() {
         const parsed = JSON.parse(item.data);
         const subs: SubtitleEntry[] = parsed.subtitles || [];
         setEntries(subs);
+        setVideoUri(parsed.videoUri || null);
         if (subs.length > 0) {
           setDurationMs(subs[subs.length - 1].endMs);
         }
@@ -58,37 +79,55 @@ export default function VideoPlayerScreen() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [id]);
 
-  const tick = useCallback(() => {
-    const elapsed = Date.now() - startRef.current + pausedRef.current;
+  // Drive highlighting from a given playback position (shared by both paths).
+  const applyPosition = useCallback((elapsed: number) => {
     setPositionMs(elapsed);
     const idx = entries.findIndex((e) => elapsed >= e.startMs && elapsed < e.endMs);
     setActiveIdx(idx);
-
     if (idx >= 0 && entries[idx].words && entries[idx].words.length > 0) {
       const words = entries[idx].words!;
-      // Fun-ASR returns absolute timestamps (ms from audio start), use them directly
       const wi = words.findIndex((w) => elapsed >= w.begin_time && elapsed < w.end_time);
       setActiveWordIdx(wi);
     } else {
       setActiveWordIdx(-1);
     }
+  }, [entries]);
 
+  // ---- Native (expo-av) path ----
+  const onPlaybackStatus = useCallback((status: any) => {
+    if (!status.isLoaded) return;
+    if (typeof status.durationMillis === 'number' && status.durationMillis > 0) {
+      setDurationMs(status.durationMillis);
+    }
+    setIsPlaying(!!status.isPlaying);
+    applyPosition(status.positionMillis || 0);
+    if (status.didJustFinish) {
+      setIsPlaying(false);
+      setPositionMs(0);
+      pausedRef.current = 0;
+    }
+  }, [applyPosition]);
+
+  // ---- Timer fallback path (no native audio module) ----
+  const tick = useCallback(() => {
+    const elapsed = Date.now() - startRef.current + pausedRef.current;
+    applyPosition(elapsed);
     if (elapsed >= durationMs && durationMs > 0) {
       setIsPlaying(false);
       pausedRef.current = 0;
       setPositionMs(0);
     }
-  }, [entries, durationMs]);
+  }, [applyPosition, durationMs]);
 
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && !useNative) {
       startRef.current = Date.now();
       timerRef.current = setInterval(tick, 80);
     } else {
       if (timerRef.current) clearInterval(timerRef.current);
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [isPlaying]);
+  }, [isPlaying, useNative, tick]);
 
   useEffect(() => {
     if (activeIdx >= 0 && scrollRef.current) {
@@ -97,14 +136,24 @@ export default function VideoPlayerScreen() {
   }, [activeIdx]);
 
   const toggle = () => {
-    if (isPlaying) { pausedRef.current = positionMs; setIsPlaying(false); }
-    else { startRef.current = Date.now(); setIsPlaying(true); }
+    if (useNative && videoRef.current) {
+      if (isPlaying) videoRef.current.pauseAsync();
+      else videoRef.current.playAsync();
+    } else {
+      if (isPlaying) { pausedRef.current = positionMs; setIsPlaying(false); }
+      else { startRef.current = Date.now(); setIsPlaying(true); }
+    }
   };
 
   const seek = (ms: number) => {
-    pausedRef.current = ms;
-    setPositionMs(ms);
-    if (isPlaying) startRef.current = Date.now();
+    if (useNative && videoRef.current) {
+      videoRef.current.setPositionAsync(ms);
+      setPositionMs(ms);
+    } else {
+      pausedRef.current = ms;
+      setPositionMs(ms);
+      if (isPlaying) startRef.current = Date.now();
+    }
   };
 
   return (
@@ -122,6 +171,9 @@ export default function VideoPlayerScreen() {
         <Pressable onPress={toggle} style={styles.playBtn}>
           <Text style={styles.playIcon}>{isPlaying ? '⏸' : '▶'}</Text>
         </Pressable>
+        {!useNative && (
+          <Text style={styles.note}>No audio module in this Expo Go — subtitles only. Build a dev client for sound.</Text>
+        )}
       </View>
 
       <ScrollView ref={scrollRef} style={styles.list} contentContainerStyle={styles.listC}>
@@ -145,6 +197,17 @@ export default function VideoPlayerScreen() {
           );
         })}
       </ScrollView>
+
+      {useNative && videoUri && (
+        <AVVideo
+          ref={videoRef}
+          style={{ width: 0, height: 0, opacity: 0 }}
+          source={{ uri: videoUri }}
+          resizeMode="cover"
+          onPlaybackStatusUpdate={onPlaybackStatus}
+          useNativeControls={false}
+        />
+      )}
     </View>
   );
 }
@@ -161,6 +224,7 @@ const styles = StyleSheet.create({
   t: { fontSize: 11, color: '#888780' },
   playBtn: { paddingVertical: 6, paddingHorizontal: 20 },
   playIcon: { fontSize: 26, color: '#534AB7' },
+  note: { fontSize: 10, color: '#B4B2A9', marginTop: 6, textAlign: 'center' },
   list: { flex: 1 },
   listC: { padding: 14, paddingBottom: 40 },
   block: {

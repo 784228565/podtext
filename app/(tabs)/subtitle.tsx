@@ -11,7 +11,7 @@ import {
 import * as DocumentPicker from 'expo-document-picker';
 import { useRouter } from 'expo-router';
 import { uuidv4 } from '../../src/utils/uuid';
-import { transcribeAudio } from '../../src/services/funasr';
+import { transcribe } from '../../src/services/funasr';
 import { translateText } from '../../src/services/mimo';
 import { generateBilingualSubtitles, generateSRT, SubtitleEntry } from '../../src/utils/srt';
 import { addHistory, getSettings, loadAllSettings } from '../../src/store/settings';
@@ -34,17 +34,17 @@ export default function SubtitleScreen() {
       if (result.canceled) return;
       const file = result.assets[0];
       const sizeMB = (file.size || 0) / (1024 * 1024);
-      if (sizeMB > 15) {
-        Alert.alert('File too large', 'Max 15MB. Use a shorter clip.');
+      if (sizeMB > 300) {
+        Alert.alert('File too large', 'Max 300MB. Larger clips need to be trimmed.');
         return;
       }
-      await processVideo(file.uri, selectedLang);
+      await processVideo(file, selectedLang);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed');
     }
   };
 
-  const processVideo = async (uri: string, lang: string) => {
+  const processVideo = async (file: any, lang: string) => {
     try {
       await loadAllSettings();
       const settings = getSettings();
@@ -54,46 +54,58 @@ export default function SubtitleScreen() {
       }
       setState('transcribing');
       setStatusText(`Transcribing (${lang === 'ja' ? 'Japanese' : 'English'})...`);
-      const result = await transcribeAudio(uri, lang);
+      const result = await transcribe(file.uri, file.name, file.mimeType || 'video/mp4', file.size || 0, lang);
 
-      // Parse words from Fun-ASR response, split by "。" punctuation
-      const rawWords = (result.sentences[0]?.words || []).map((w: any) => ({
-        text: (w.text || '') + (w.punctuation || ''),
-        begin_time: w.begin_time || 0,
-        end_time: w.end_time || 0,
-        punct: w.punctuation || '',
-      }));
-      const fullText = result.sentences[0]?.text || result.text;
+      let sentences: any[];
+      if (result.preSegmented) {
+        // Async path: already segmented, possibly with per-word timings.
+        sentences = result.sentences
+          .map((s: any) => ({
+            text: s.text,
+            begin_time: s.begin_time || 0,
+            end_time: s.end_time || 0,
+            words: (s.words || []).map((w: any) => ({ text: w.text, begin_time: w.begin_time, end_time: w.end_time })),
+          }))
+          .filter((s: any) => s.text && s.text.trim());
+      } else {
+        // Sync flash path: one blob with words -> split by "。" punctuation.
+        const rawWords = (result.sentences[0]?.words || []).map((w: any) => ({
+          text: (w.text || '') + (w.punctuation || ''),
+          begin_time: w.begin_time || 0,
+          end_time: w.end_time || 0,
+          punct: w.punctuation || '',
+        }));
+        const fullText = result.sentences[0]?.text || result.text;
 
-      // Split by "。" from full text, rebuild sentences tracking word positions
-      const parts = fullText.split(/(?<=。)/g);
-      const rawSentences = parts.filter((s: string) => s.trim());
-      const sentences: any[] = [];
-      let wordPos = 0;
+        // Split by "。" from full text, rebuild sentences tracking word positions
+        const parts = fullText.split(/(?<=。)/g);
+        const rawSentences = parts.filter((s: string) => s.trim());
+        sentences = [];
+        let wordPos = 0;
 
-      for (const st of rawSentences) {
-        const clean = st.replace(/\s+/g, '');
-        const sentWords: any[] = [];
-        let charUsed = 0;
+        for (const st of rawSentences) {
+          const clean = st.replace(/\s+/g, '');
+          const sentWords: any[] = [];
+          let charUsed = 0;
 
-        while (wordPos < rawWords.length && charUsed < clean.length) {
-          const w = rawWords[wordPos];
-          // count non-space chars in this word (text + punct)
-          const wLen = w.text.replace(/\s+/g, '').length;
-          if (wLen === 0) { wordPos++; continue; }
-          const remaining = clean.length - charUsed;
-          if (wLen <= remaining) {
-            sentWords.push(w);
-            charUsed += wLen;
-            wordPos++;
-          } else {
-            break;
+          while (wordPos < rawWords.length && charUsed < clean.length) {
+            const w = rawWords[wordPos];
+            const wLen = w.text.replace(/\s+/g, '').length;
+            if (wLen === 0) { wordPos++; continue; }
+            const remaining = clean.length - charUsed;
+            if (wLen <= remaining) {
+              sentWords.push(w);
+              charUsed += wLen;
+              wordPos++;
+            } else {
+              break;
+            }
           }
-        }
 
-        const begin = sentWords[0]?.begin_time ?? 0;
-        const end = sentWords.length > 0 ? sentWords[sentWords.length - 1].end_time : begin + 2000;
-        sentences.push({ text: st, begin_time: begin, end_time: end, words: sentWords });
+          const begin = sentWords[0]?.begin_time ?? 0;
+          const end = sentWords.length > 0 ? sentWords[sentWords.length - 1].end_time : begin + 2000;
+          sentences.push({ text: st, begin_time: begin, end_time: end, words: sentWords });
+        }
       }
 
       setState('translating');
@@ -110,8 +122,8 @@ export default function SubtitleScreen() {
 
       await addHistory({
         id, type: 'video',
-        title: uri.split('/').pop() || 'Untitled',
-        data: JSON.stringify({ videoUri: uri, subtitles: entries }),
+        title: (file.uri || '').split('/').pop() || 'Untitled',
+        data: JSON.stringify({ videoUri: file.uri, subtitles: entries }),
       });
 
       setState('done');
