@@ -6,8 +6,9 @@ const FUNASR_TASK_BASE = 'https://dashscope.aliyuncs.com/api/v1/tasks';
 const DASHSCOPE_UPLOAD = 'https://dashscope.aliyuncs.com/api/v1/uploads';
 
 // Threshold above which we use the async file-transcription path (bypasses the
-// ~20MB base64 Data-URI limit of the synchronous flash model).
-export const LARGE_FILE_MB = 18;
+// ~20MB base64 Data-URI limit of the synchronous flash model). Kept well below
+// 20MB so a known-size file can never hit the data-uri cap.
+export const LARGE_FILE_MB = 15;
 
 interface FunASRWord {
   text: string;
@@ -113,26 +114,34 @@ async function uploadToTempOSS(
     { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }
   );
   const policyJson = await policyRes.json();
-  if (policyJson.code !== undefined && policyJson.code !== 'null' && policyJson.code !== 0 && policyJson.code !== '0') {
-    throw new Error(`Fun-ASR upload policy failed: ${JSON.stringify(policyJson)}`);
-  }
-  const d = policyJson.data;
-  if (!d || !d.upload_host || !d.upload_dir) {
+  // DashScope returns the policy nested under different shapes across models;
+  // tolerate both `data` and `output` wrappers and grab the first usable blob.
+  const d = policyJson.data || policyJson.output || policyJson;
+  if (!d || (!d.upload_host && !d.upload_url) || (!d.upload_dir && !d.object_key_prefix)) {
     throw new Error(`Fun-ASR upload policy missing fields: ${JSON.stringify(policyJson)}`);
   }
 
+  // Tolerant field extraction — field names vary across DashScope docs versions.
+  const uploadHost = d.upload_host || d.upload_url;
+  const uploadDir = d.upload_dir || d.object_key_prefix || d.dir;
+  const ossAccessKeyId = d.oss_access_key_id || d.ossAccessKeyId || d.accessid;
+  const signature = d.signature || d.sign || d.policy_signature;
+  const policy = d.policy;
+  const acl = d.x_oss_object_acl || d.acl || 'private';
+  const forbidOverwrite = d.x_oss_forbid_overwrite || d.forbidOverwrite || 'true';
+
   // Step 2: POST file to OSS with signed policy
   const form = new FormData();
-  form.append('OSSAccessKeyId', d.oss_access_key_id);
-  form.append('Signature', d.signature);
-  form.append('policy', d.policy);
-  form.append('x-oss-object-acl', d.x_oss_object_acl);
-  form.append('x-oss-forbid-overwrite', String(d.x_oss_forbid_overwrite));
-  form.append('key', `${d.upload_dir}/${fileName}`);
+  if (ossAccessKeyId) form.append('OSSAccessKeyId', ossAccessKeyId);
+  if (signature) form.append('Signature', signature);
+  if (policy) form.append('policy', policy);
+  form.append('x-oss-object-acl', acl);
+  form.append('x-oss-forbid-overwrite', String(forbidOverwrite));
+  form.append('key', `${uploadDir}/${fileName}`);
   form.append('success_action_status', '200');
   form.append('file', { uri: fileUri, name: fileName, type: mimeType } as any);
 
-  const ossRes = await fetch(d.upload_host, {
+  const ossRes = await fetch(uploadHost, {
     method: 'POST',
     body: form,
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -142,7 +151,7 @@ async function uploadToTempOSS(
     throw new Error(`Fun-ASR OSS upload failed (${ossRes.status}): ${body}`);
   }
   // The oss:// URL is deterministic from upload_dir + fileName.
-  return `oss://${d.upload_dir}/${fileName}`;
+  return `oss://${uploadDir}/${fileName}`;
 }
 
 function num(v: any, fallback = 0): number {
@@ -280,9 +289,33 @@ export async function transcribe(
 ): Promise<FunASRResult> {
   const settings = getSettings();
   if (!settings.funasrApiKey) throw new Error('Fun-ASR API key not configured');
-  const sizeMB = sizeBytes / (1024 * 1024);
-  if (sizeMB > LARGE_FILE_MB) {
+  const sizeMB = (sizeBytes || 0) / (1024 * 1024);
+
+  // The synchronous flash model caps at ~20MB via base64 Data-URI.
+  // Route to the async (OSS upload) path when the file is clearly large OR when
+  // its size is unknown (the document picker often returns size=0 on Android),
+  // since naively trusting size=0 would push huge files through the sync path
+  // and hit the data-uri limit.
+  if (sizeMB > LARGE_FILE_MB || sizeMB <= 0) {
+    onProgress?.(
+      sizeMB > LARGE_FILE_MB
+        ? `文件较大（${sizeMB.toFixed(1)}MB），使用大文件异步转录...`
+        : '文件大小未知，使用大文件异步转录...'
+    );
     return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey, onProgress);
   }
-  return transcribeAudio(fileUri, language, onProgress);
+
+  // Known small file → synchronous path (preserves word-level timings).
+  try {
+    return await transcribeAudio(fileUri, language, onProgress);
+  } catch (err: any) {
+    const msg = err?.message || '';
+    // The sync path caps at 20MB data-uri. If it failed because of size, retry
+    // via the async path instead of surfacing a hard error.
+    if (/TooLarge|20971520|data-uri|max bytes/i.test(msg)) {
+      onProgress?.('文件超过同步接口限制，自动切换到大文件异步转录...');
+      return transcribeLargeFile(fileUri, fileName, mimeType, settings.funasrApiKey, onProgress);
+    }
+    throw err;
+  }
 }
