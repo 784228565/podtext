@@ -1,5 +1,9 @@
 # PodText
 
+<p align="center">
+  <a href="./README.md">English</a> · <a href="./README.zh-CN.md">中文</a>
+</p>
+
 > AI 驱动的**双语字幕**与**英文播客**生成，全部在手机上完成。
 > AI-powered bilingual subtitles and English podcast generation, on your phone.
 
