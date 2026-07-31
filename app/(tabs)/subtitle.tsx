@@ -15,6 +15,7 @@ import { transcribe } from '../../src/services/funasr';
 import { translateText } from '../../src/services/mimo';
 import { generateBilingualSubtitles, SubtitleEntry } from '../../src/utils/srt';
 import { addHistory, getSettings, loadAllSettings } from '../../src/store/settings';
+import { debug, truncate } from '../../src/utils/debug';
 
 type JobStatus = 'queued' | 'transcribing' | 'translating' | 'done' | 'error';
 interface Job {
@@ -44,6 +45,7 @@ export default function SubtitleScreen() {
       if (result.canceled) return;
       const file = result.assets[0];
       const sizeMB = (file.size || 0) / (1024 * 1024);
+      debug('SUBTITLE', `picked: "${file.name}" size=${sizeMB.toFixed(1)}MB mime=${file.mimeType} uri=${truncate(file.uri, 80)}`);
       if (sizeMB > 300) {
         Alert.alert('File too large', 'Max 300MB. Larger clips need to be trimmed.');
         return;
@@ -139,6 +141,7 @@ export default function SubtitleScreen() {
       );
 
       const entries: SubtitleEntry[] = generateBilingualSubtitles(sentences, translations);
+      debug('SUBTITLE', `done: ${entries.length} subtitle entries, ${entries.filter(e => e.words && e.words.length > 0).length} with word timings`);
       const id = uuidv4();
       await addHistory({
         id,

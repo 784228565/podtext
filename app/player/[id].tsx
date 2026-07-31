@@ -8,21 +8,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, Stack } from 'expo-router';
 import { getHistory } from '../../src/store/settings';
-
-// Detect whether the native audio module (ExponentAV) is present in this binary.
-// On the GitHub-built Expo Go 57 it is NOT, so we silently fall back to a timer.
-// After installing an EAS dev build (which bundles expo-av), this becomes available
-// and the player produces real sound.
-let AVVideo: any = null;
-try {
-  const av = require('expo-av');
-  const RN = require('react-native');
-  if (av && av.Video && RN && RN.NativeModules && RN.NativeModules.ExponentAV) {
-    AVVideo = av.Video;
-  }
-} catch (e) {
-  AVVideo = null;
-}
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 interface SubtitleWord {
   text: string;
@@ -54,13 +40,16 @@ export default function VideoPlayerScreen() {
   const [activeWordIdx, setActiveWordIdx] = useState(-1);
   const [videoUri, setVideoUri] = useState<string | null>(null);
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startRef = useRef(0);
-  const pausedRef = useRef(0);
   const scrollRef = useRef<ScrollView>(null);
-  const videoRef = useRef<any>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const useNative = !!AVVideo && !!videoUri;
+  // expo-video player — always created (hooks must be unconditional).
+  // Passes a fallback URI when videoUri is not yet loaded; VideoView is not
+  // rendered in that state, so the placeholder never plays.
+  const player = useVideoPlayer(
+    videoUri || { uri: '' },
+    (init) => { init.loop = false; },
+  );
 
   useEffect(() => {
     (async () => {
@@ -76,10 +65,10 @@ export default function VideoPlayerScreen() {
         }
       }
     })();
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id]);
 
-  // Drive highlighting from a given playback position (shared by both paths).
+  // Drive subtitle highlighting from a given playback position.
   const applyPosition = useCallback((elapsed: number) => {
     setPositionMs(elapsed);
     const idx = entries.findIndex((e) => elapsed >= e.startMs && elapsed < e.endMs);
@@ -93,41 +82,27 @@ export default function VideoPlayerScreen() {
     }
   }, [entries]);
 
-  // ---- Native (expo-av) path ----
-  const onPlaybackStatus = useCallback((status: any) => {
-    if (!status.isLoaded) return;
-    if (typeof status.durationMillis === 'number' && status.durationMillis > 0) {
-      setDurationMs(status.durationMillis);
-    }
-    setIsPlaying(!!status.isPlaying);
-    applyPosition(status.positionMillis || 0);
-    if (status.didJustFinish) {
-      setIsPlaying(false);
-      setPositionMs(0);
-      pausedRef.current = 0;
-    }
-  }, [applyPosition]);
-
-  // ---- Timer fallback path (no native audio module) ----
-  const tick = useCallback(() => {
-    const elapsed = Date.now() - startRef.current + pausedRef.current;
-    applyPosition(elapsed);
-    if (elapsed >= durationMs && durationMs > 0) {
-      setIsPlaying(false);
-      pausedRef.current = 0;
-      setPositionMs(0);
-    }
-  }, [applyPosition, durationMs]);
-
+  // Poll the VideoPlayer for current position — expo-video does not provide
+  // a continuous callback, but currentTime is updated synchronously each frame.
   useEffect(() => {
-    if (isPlaying && !useNative) {
-      startRef.current = Date.now();
-      timerRef.current = setInterval(tick, 80);
+    if (isPlaying && videoUri) {
+      pollRef.current = setInterval(() => {
+        const pos = player.currentTime * 1000;
+        const dur = player.duration * 1000;
+        setPositionMs(pos);
+        if (dur > 0) setDurationMs(dur);
+        applyPosition(pos);
+        // Reset on completion (player stops but we need to sync UI).
+        if (player.duration > 0 && player.currentTime >= player.duration - 0.1) {
+          setIsPlaying(false);
+          setPositionMs(0);
+        }
+      }, 100);
     } else {
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (pollRef.current) clearInterval(pollRef.current);
     }
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [isPlaying, useNative, tick]);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [isPlaying, videoUri, player, applyPosition]);
 
   useEffect(() => {
     if (activeIdx >= 0 && scrollRef.current) {
@@ -136,24 +111,19 @@ export default function VideoPlayerScreen() {
   }, [activeIdx]);
 
   const toggle = () => {
-    if (useNative && videoRef.current) {
-      if (isPlaying) videoRef.current.pauseAsync();
-      else videoRef.current.playAsync();
+    if (isPlaying) {
+      player.pause();
+      setIsPlaying(false);
     } else {
-      if (isPlaying) { pausedRef.current = positionMs; setIsPlaying(false); }
-      else { startRef.current = Date.now(); setIsPlaying(true); }
+      player.play();
+      setIsPlaying(true);
     }
   };
 
   const seek = (ms: number) => {
-    if (useNative && videoRef.current) {
-      videoRef.current.setPositionAsync(ms);
-      setPositionMs(ms);
-    } else {
-      pausedRef.current = ms;
-      setPositionMs(ms);
-      if (isPlaying) startRef.current = Date.now();
-    }
+    player.currentTime = ms / 1000;
+    setPositionMs(ms);
+    applyPosition(ms);
   };
 
   return (
@@ -169,11 +139,8 @@ export default function VideoPlayerScreen() {
           <Text style={styles.t}>{formatTime(durationMs)}</Text>
         </View>
         <Pressable onPress={toggle} style={styles.playBtn}>
-          <Text style={styles.playIcon}>{isPlaying ? '⏸' : '▶'}</Text>
+          <Text style={styles.playIcon}>{isPlaying ? '\u23F8' : '\u25B6'}</Text>
         </Pressable>
-        {!useNative && (
-          <Text style={styles.note}>No audio module in this Expo Go — subtitles only. Build a dev client for sound.</Text>
-        )}
       </View>
 
       <ScrollView ref={scrollRef} style={styles.list} contentContainerStyle={styles.listC}>
@@ -198,14 +165,11 @@ export default function VideoPlayerScreen() {
         })}
       </ScrollView>
 
-      {useNative && videoUri && (
-        <AVVideo
-          ref={videoRef}
-          style={{ width: 0, height: 0, opacity: 0 }}
-          source={{ uri: videoUri }}
-          resizeMode="cover"
-          onPlaybackStatusUpdate={onPlaybackStatus}
-          useNativeControls={false}
+      {videoUri && (
+        <VideoView
+          player={player}
+          style={styles.hiddenVideo}
+          nativeControls={false}
         />
       )}
     </View>
@@ -224,7 +188,6 @@ const styles = StyleSheet.create({
   t: { fontSize: 11, color: '#888780' },
   playBtn: { paddingVertical: 6, paddingHorizontal: 20 },
   playIcon: { fontSize: 26, color: '#534AB7' },
-  note: { fontSize: 10, color: '#B4B2A9', marginTop: 6, textAlign: 'center' },
   list: { flex: 1 },
   listC: { padding: 14, paddingBottom: 40 },
   block: {
@@ -236,4 +199,5 @@ const styles = StyleSheet.create({
   orig: { fontSize: 16, fontWeight: '500', color: '#2C2C2A', lineHeight: 26, marginBottom: 6 },
   wordHi: { backgroundColor: '#C5C2F5', borderRadius: 3, paddingHorizontal: 2 },
   trans: { fontSize: 14, color: '#534AB7', lineHeight: 20 },
+  hiddenVideo: { position: 'absolute', width: 1, height: 1, opacity: 0 },
 });

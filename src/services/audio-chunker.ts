@@ -1,13 +1,16 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { debug, truncate } from '../utils/debug';
 
-// ffmpeg-kit-react-native is a native module — absent from Expo Go, present in
-// an EAS dev build. Same runtime-probe pattern as the player's ExponentAV
-// check: require it, verify the native module exists, degrade gracefully.
+// ffmpeg-kit-react-native (lufinkey fork) bundles the AAR in android/libs/
+// — no remote Maven dependency. Absent from Expo Go, present in EAS dev build.
 let FFmpegKit: any = null;
 try {
   const mod = require('ffmpeg-kit-react-native');
   const { NativeModules } = require('react-native');
-  if (mod && mod.FFmpegKit && NativeModules.FFmpegKit) {
+  // ffmpeg-kit-react-native registers its native module as
+  // FFmpegKitReactNativeModule, not FFmpegKit. The JS wrapper
+  // (FFmpegKit) and the native bridge are separate things.
+  if (mod && mod.FFmpegKit && NativeModules.FFmpegKitReactNativeModule) {
     FFmpegKit = mod.FFmpegKit;
   }
 } catch {
@@ -26,12 +29,17 @@ const WORK_DIR = `${FileSystem.cacheDirectory}chunker/`;
 export const CHUNK_SECONDS = 300;
 
 async function runFFmpeg(args: string): Promise<void> {
+  debug('FFMPEG', 'execute:', truncate(args, 200));
+  const start = Date.now();
   const session = await FFmpegKit.execute(args);
   const rc = await session.getReturnCode();
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   if (!rc.isValueSuccess()) {
     const output = await session.getOutput();
+    debug('FFMPEG', `FAILED (${elapsed}s) rc=${rc.getValue()}:`, truncate(output || '', 500));
     throw new Error(`ffmpeg failed (rc=${rc.getValue()}): ${output || args}`);
   }
+  debug('FFMPEG', `OK (${elapsed}s)`);
 }
 
 async function prepareWorkDir(): Promise<void> {
@@ -49,25 +57,33 @@ export async function extractAudioWav(
 ): Promise<{ uri: string; sizeBytes: number }> {
   if (!FFmpegKit) throw new Error('ffmpeg not available in this build');
   await prepareWorkDir();
+  debug('CHUNKER', 'extractAudioWav from:', truncate(inputUri, 120));
   const wavUri = `${WORK_DIR}full.wav`;
   await runFFmpeg(`-y -i "${inputUri}" -vn -ac 1 -ar 16000 -f wav "${wavUri}"`);
   const info = await FileSystem.getInfoAsync(wavUri);
   if (!info.exists || !info.size) throw new Error('ffmpeg produced no output');
+  debug('CHUNKER', `WAV extracted: ${(info.size / 1024 / 1024).toFixed(1)} MB`);
   return { uri: wavUri, sizeBytes: info.size };
 }
 
 // Split a WAV into fixed-duration chunks. Returns chunk uris in order.
 // Offset of chunk i = i * CHUNK_SECONDS (ffmpeg pads the last one short).
+// NOTE: do NOT use `-c copy` with WAV — the segment muxer copies raw PCM
+// bytes without generating proper RIFF headers for each chunk, producing
+// invalid WAV files that ASR cannot decode. Let ffmpeg remux (no quality
+// loss for PCM→PCM) so every chunk gets a valid WAV header.
 export async function splitWavIntoChunks(wavUri: string): Promise<string[]> {
   if (!FFmpegKit) throw new Error('ffmpeg not available in this build');
   const pattern = `${WORK_DIR}chunk_%04d.wav`;
+  debug('CHUNKER', 'splitWavIntoChunks, segment_time=', CHUNK_SECONDS, 's');
   await runFFmpeg(
-    `-y -i "${wavUri}" -f segment -segment_time ${CHUNK_SECONDS} -c copy "${pattern}"`
+    `-y -i "${wavUri}" -f segment -segment_time ${CHUNK_SECONDS} "${pattern}"`
   );
   const names = (await FileSystem.readDirectoryAsync(WORK_DIR))
     .filter((n) => /^chunk_\d+\.wav$/.test(n))
     .sort();
   if (names.length === 0) throw new Error('ffmpeg split produced no chunks');
+  debug('CHUNKER', `split into ${names.length} chunks`);
   return names.map((n) => `${WORK_DIR}${n}`);
 }
 

@@ -6,6 +6,7 @@ import {
   cleanupChunks,
   CHUNK_SECONDS,
 } from './audio-chunker';
+import { debug, truncate } from '../utils/debug';
 
 const FUNASR_BASE = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 const FUNASR_ASYNC_SUBMIT = 'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription';
@@ -355,20 +356,25 @@ async function transcribeByChunks(
   onProgress?: (msg: string) => void
 ): Promise<FunASRResult> {
   onProgress?.('提取音轨中...');
+  debug('CHUNK-PATH', 'start transcribeByChunks');
   const maxSingle = (LARGE_FILE_MB - 1) * 1024 * 1024; // keep base64 well under 20MB
   const { uris, chunked } = await mediaToWavChunks(fileUri, maxSingle);
   try {
     if (!chunked) {
       // Audio track alone is small enough — single sync call, best continuity.
       onProgress?.('音轨较小，整段同步转录...');
+      debug('CHUNK-PATH', `single WAV (${uris.length} file), sync transcribe`);
       return await transcribeAudio(uris[0], language, onProgress);
     }
     const parts: FunASRResult[] = [];
+    debug('CHUNK-PATH', `multi-chunk: ${uris.length} segments`);
     for (let i = 0; i < uris.length; i++) {
       onProgress?.(`转录片段 ${i + 1}/${uris.length}...`);
       parts.push(await transcribeAudio(uris[i], language, onProgress));
     }
-    return mergeChunkResults(parts);
+    const merged = mergeChunkResults(parts);
+    debug('CHUNK-PATH', `merged: ${merged.sentences[0]?.words?.length ?? 0} words, text=${merged.text.length} chars, endMs=${merged.sentences[0]?.end_time ?? 0}`);
+    return merged;
   } finally {
     cleanupChunks();
   }
@@ -408,6 +414,8 @@ export async function transcribe(
   const settings = getSettings();
   if (!settings.funasrApiKey) throw new Error('Fun-ASR API key not configured');
   let sizeMB = (sizeBytes || 0) / (1024 * 1024);
+  const ffmpegOk = isFFmpegAvailable();
+  debug('TRANSCRIBE', `file="${fileName}" sizeMB=${sizeMB.toFixed(1)} mime=${mimeType} ffmpeg=${ffmpegOk}`);
 
   // The document picker often reports size=0 on Android. Blindly treating
   // unknown size as "large" would route EVERY file to the async path, which
@@ -418,9 +426,10 @@ export async function transcribe(
       const info = await FileSystem.getInfoAsync(fileUri);
       if (info.exists && typeof info.size === 'number' && info.size > 0) {
         sizeMB = info.size / (1024 * 1024);
+        debug('TRANSCRIBE', `disk probe: ${sizeMB.toFixed(1)} MB`);
       }
     } catch {
-      // probe failed — sizeMB stays 0 → async path below
+      debug('TRANSCRIBE', 'disk probe failed, size unknown');
     }
   }
 
@@ -428,9 +437,13 @@ export async function transcribe(
   // Large/unknown-size files: dev builds chunk the audio and stay on the
   // sync model (word-level); Expo Go falls back to async (sentence-level).
   if (sizeMB > LARGE_FILE_MB || sizeMB <= 0) {
+    const route = sizeMB > LARGE_FILE_MB
+      ? (ffmpegOk ? 'CHUNKED-SYNC' : 'ASYNC-OSS')
+      : 'ASYNC-OSS (unknown size)';
+    debug('TRANSCRIBE', `routing → ${route}`);
     onProgress?.(
       sizeMB > LARGE_FILE_MB
-        ? `文件较大（${sizeMB.toFixed(1)}MB），${isFFmpegAvailable() ? '切片转录' : '使用大文件异步转录'}...`
+        ? `文件较大（${sizeMB.toFixed(1)}MB），${ffmpegOk ? '切片转录' : '使用大文件异步转录'}...`
         : '文件大小未知，使用大文件异步转录...'
     );
     return transcribeViaChunksOrAsync(

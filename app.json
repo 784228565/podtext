@@ -33,13 +33,10 @@
     },
     "plugins": [
       "expo-router",
-      "expo-av",
       "expo-sqlite",
       "expo-document-picker",
       "expo-file-system",
-      "expo-status-bar",
-      "expo-dev-client",
-      ["@config-plugins/ffmpeg-kit-react-native", { "package": "min" }]
+      "expo-dev-client"
     ],
     "extra": {
       "router": {},
